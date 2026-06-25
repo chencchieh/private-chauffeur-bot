@@ -186,7 +186,9 @@ def valid_pax(text: str) -> bool:
     HOURLY_DURATION,
     SPECIAL_REQUESTS,
     CONFIRM_BOOKING,
-) = range(10)
+    EXTRA_PICKUP,
+    EXTRA_DROPOFF,
+) = range(12)
 
 logging.basicConfig(
     format="%(asctime)s — %(name)s — %(levelname)s — %(message)s",
@@ -205,7 +207,13 @@ def service_label(key):
     }.get(key, key)
 
 def build_summary(data: dict) -> str:
-    svc = service_label(data.get("service", ""))
+    svc_key = data.get("service", "")
+    svc = service_label(svc_key)
+    extra_pickups  = data.get("extra_pickups", [])
+    extra_dropoffs = data.get("extra_dropoffs", [])
+    extra_stop_count = len(extra_pickups) + len(extra_dropoffs)
+    extra_charge = extra_stop_count * 10
+
     lines = [
         "📋 *Booking Summary*",
         "─────────────────────",
@@ -213,19 +221,29 @@ def build_summary(data: dict) -> str:
         f"📅 *Date:* {data.get('date', '—')}",
         f"🕐 *Time:* {data.get('time', '—')}",
         f"📍 *Pick-up:* {data.get('pickup', '—')}",
-        f"🏁 *Drop-off:* {data.get('dropoff', '—')}",
     ]
-    if data.get("service") in ("airport_arrival", "airport_departure"):
+    for i, ep in enumerate(extra_pickups, 2):
+        lines.append(f"📍 *Pick-up #{i}:* {ep}  _(+S$10)_")
+    lines.append(f"🏁 *Drop-off:* {data.get('dropoff', '—')}")
+    for i, ed in enumerate(extra_dropoffs, 2):
+        lines.append(f"🏁 *Drop-off #{i}:* {ed}  _(+S$10)_")
+
+    if svc_key in ("airport_arrival", "airport_departure"):
         lines.append(f"✈️ *Flight No:* {data.get('flight', 'Not provided')}")
-    if data.get("service") == "hourly":
+    if svc_key == "hourly":
         dur = data.get("duration", "—")
         total = RATES["hourly"] * int(dur) if str(dur).isdigit() else "—"
         lines.append(f"⏳ *Duration:* {dur} hrs")
         lines.append(f"💵 *Est. Total:* S${total}")
         lines.append(f"⏱️ _Extension beyond booked time: S${EXTENSION_RATE:.2f}/min_")
     else:
-        rate = RATES.get(data.get("service", ""), "—")
-        lines.append(f"💵 *Rate:* S${rate}")
+        base = RATES.get(svc_key, 0)
+        if extra_charge:
+            lines.append(f"💵 *Base Rate:* S${base}")
+            lines.append(f"➕ *Extra Stops:* +S${extra_charge} ({extra_stop_count} × S$10)")
+            lines.append(f"💵 *Total:* S${base + extra_charge}")
+        else:
+            lines.append(f"💵 *Rate:* S${base}")
     lines.append(f"👥 *Passengers:* {data.get('pax', '—')}")
     if data.get("requests"):
         lines.append(f"📝 *Requests:* {data.get('requests')}")
@@ -254,12 +272,53 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 My Bookings", callback_data="mybookings")],
         [InlineKeyboardButton("📞 Contact Chih Chieh", callback_data="contact")],
         [InlineKeyboardButton("🌐 View Business Card", url=BUSINESS_URL)],
+        [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
     await update.message.reply_text(
         welcome,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show available commands — owner sees extra management commands."""
+    user_id = str(update.effective_user.id)
+    is_owner = user_id == str(OWNER_CHAT_ID)
+
+    text = (
+        "📖 *Available Commands*\n"
+        "─────────────────────\n\n"
+        "👤 *Customer Commands*\n"
+        "/start — Main menu\n"
+        "/mybookings — View your bookings\n"
+        "/help — Show this help\n"
+    )
+
+    if is_owner:
+        text += (
+            "\n🔑 *Owner Commands*\n"
+            "/listbookings — View all bookings\n"
+            "/confirm `CC-XXXX` — Confirm a booking\n"
+            "/reply `CC-XXXX` message — Message a customer\n"
+            "/cancelride `CC-XXXX` reason — Cancel a booking\n"
+            "/stats — Booking statistics\n"
+            "/broadcast message — Message all customers\n\n"
+            "📅 *Availability*\n"
+            "/block `24 Dec` to `2 Jan` reason — Block date range\n"
+            "/unblock `24 Dec` to `2 Jan` — Unblock date range\n"
+            "/setavailability `date` reason — Block a single date\n"
+            "/clearavailability `date` — Unblock a single date\n"
+            "/viewavailability — View all blocked dates\n\n"
+            "🗑️ *Danger Zone*\n"
+            "/clearbookings confirm — Wipe all bookings\n"
+        )
+
+    keyboard = [[InlineKeyboardButton("🏠 Main Menu", callback_data="menu")]]
+    await update.message.reply_text(
+        text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
 
 async def main_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -346,6 +405,43 @@ async def main_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("📋 My Bookings", callback_data="mybookings")],
                 [InlineKeyboardButton("📞 Contact Chih Chieh", callback_data="contact")],
                 [InlineKeyboardButton("🌐 Business Card", url=BUSINESS_URL)],
+                [InlineKeyboardButton("❓ Help", callback_data="help")],
+            ])
+        )
+
+    elif q.data == "help":
+        user_id = str(q.from_user.id)
+        is_owner = user_id == str(OWNER_CHAT_ID)
+        text = (
+            "📖 *Available Commands*\n"
+            "─────────────────────\n\n"
+            "👤 *Customer Commands*\n"
+            "/start — Main menu\n"
+            "/mybookings — View your bookings\n"
+            "/help — Show this help\n"
+        )
+        if is_owner:
+            text += (
+                "\n🔑 *Owner Commands*\n"
+                "/listbookings — View all bookings\n"
+                "/confirm `CC-XXXX` — Confirm a booking\n"
+                "/reply `CC-XXXX` message — Message a customer\n"
+                "/cancelride `CC-XXXX` reason — Cancel a booking\n"
+                "/stats — Booking statistics\n"
+                "/broadcast message — Message all customers\n\n"
+                "📅 *Availability*\n"
+                "/block `24 Dec` to `2 Jan` reason — Block date range\n"
+                "/unblock `24 Dec` to `2 Jan` — Unblock date range\n"
+                "/setavailability `date` reason — Block a single date\n"
+                "/clearavailability `date` — Unblock a single date\n"
+                "/viewavailability — View all blocked dates\n\n"
+                "🗑️ *Danger Zone*\n"
+                "/clearbookings confirm — Wipe all bookings\n"
+            )
+        await q.edit_message_text(
+            text, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Main Menu", callback_data="menu")]
             ])
         )
 
@@ -517,6 +613,7 @@ async def get_pickup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         return PICKUP_LOCATION
     ctx.user_data["pickup"] = pickup_text
+    ctx.user_data.setdefault("extra_pickups", [])
     svc = ctx.user_data.get("service")
 
     if svc == "airport_arrival":
@@ -524,18 +621,20 @@ async def get_pickup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "🏁 *Drop-off location:*\n_(e.g. 12 Marina Blvd, Blk 45 Tampines Ave 1)_",
             parse_mode="Markdown"
         )
+        return DROPOFF_LOCATION
     elif svc == "airport_departure":
         await update.message.reply_text(
-            "✈️ *Which terminal are you departing from?*",
-            parse_mode="Markdown",
-            reply_markup=terminal_keyboard("dropoff")
+            "➕ *Any additional pick-up stops?* (+S$10 each)\n"
+            "Type the address, or *done* to continue.",
+            parse_mode="Markdown"
         )
+        return EXTRA_PICKUP
     else:
         await update.message.reply_text(
             "🏁 *Drop-off / final destination:*\n_(or type 'Multiple stops' if needed)_",
             parse_mode="Markdown"
         )
-    return DROPOFF_LOCATION
+        return DROPOFF_LOCATION
 
 
 async def get_dropoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -558,9 +657,17 @@ async def get_dropoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         return DROPOFF_LOCATION
     ctx.user_data["dropoff"] = dropoff_text
+    ctx.user_data.setdefault("extra_dropoffs", [])
     svc = ctx.user_data.get("service")
 
-    if svc in ("airport_arrival", "airport_departure"):
+    if svc == "airport_arrival":
+        await update.message.reply_text(
+            "➕ *Any additional drop-off stops?* (+S$10 each)\n"
+            "Type the address, or *done* to continue.",
+            parse_mode="Markdown"
+        )
+        return EXTRA_DROPOFF
+    if svc == "airport_departure":
         await update.message.reply_text(
             "✈️ *Flight number?*\n_(e.g. SQ321 — helps me track delays)_\n"
             "Or type *skip* if you don't have it yet.",
@@ -579,6 +686,74 @@ async def get_dropoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return PAX_COUNT
+
+
+async def get_extra_pickup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Collect additional pick-up stops for airport departure (+S$10 each)."""
+    text = update.message.text.strip()
+    if text.lower() == "done":
+        await update.message.reply_text(
+            "✈️ *Which terminal are you departing from?*",
+            parse_mode="Markdown",
+            reply_markup=terminal_keyboard("dropoff")
+        )
+        return DROPOFF_LOCATION
+    ok, reason = valid_singapore_location(text)
+    if not ok:
+        msg = (
+            "⚠️ Sorry, I only operate within *Singapore*.\nPlease enter a Singapore address."
+            if reason == "foreign" else
+            "⚠️ I couldn't recognise that as a Singapore address.\n"
+            "Please be more specific — include the street name, block, or area."
+        )
+        await update.message.reply_text(
+            msg + "\n\nOr type *done* to continue without adding more stops.",
+            parse_mode="Markdown"
+        )
+        return EXTRA_PICKUP
+    ctx.user_data.setdefault("extra_pickups", []).append(text)
+    count = len(ctx.user_data["extra_pickups"])
+    await update.message.reply_text(
+        f"✅ *Pick-up #{count + 1}* added.\n\n"
+        "➕ Any more pick-up stops? (+S$10 each)\n"
+        "Type the address, or *done* to continue.",
+        parse_mode="Markdown"
+    )
+    return EXTRA_PICKUP
+
+
+async def get_extra_dropoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Collect additional drop-off stops for airport arrival (+S$10 each)."""
+    text = update.message.text.strip()
+    if text.lower() == "done":
+        await update.message.reply_text(
+            "✈️ *Flight number?*\n_(e.g. SQ321 — helps me track delays)_\n"
+            "Or type *skip* if you don't have it yet.",
+            parse_mode="Markdown"
+        )
+        return FLIGHT_NUMBER
+    ok, reason = valid_singapore_location(text)
+    if not ok:
+        msg = (
+            "⚠️ Sorry, I only operate within *Singapore*.\nPlease enter a Singapore address."
+            if reason == "foreign" else
+            "⚠️ I couldn't recognise that as a Singapore address.\n"
+            "Please be more specific — include the street name, block, or area."
+        )
+        await update.message.reply_text(
+            msg + "\n\nOr type *done* to continue without adding more stops.",
+            parse_mode="Markdown"
+        )
+        return EXTRA_DROPOFF
+    ctx.user_data.setdefault("extra_dropoffs", []).append(text)
+    count = len(ctx.user_data["extra_dropoffs"])
+    await update.message.reply_text(
+        f"✅ *Drop-off #{count + 1}* added.\n\n"
+        "➕ Any more drop-off stops? (+S$10 each)\n"
+        "Type the address, or *done* to continue.",
+        parse_mode="Markdown"
+    )
+    return EXTRA_DROPOFF
 
 
 async def get_flight(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1175,8 +1350,83 @@ async def view_availability(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if reason:
             line += f" — _{reason}_"
         lines.append(line)
-    lines.append("\n_Use /clearavailability <date> to unblock._")
+    lines.append("\n_Use /clearavailability <date> or /unblock <start> to <end> to unblock._")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+@owner_only
+async def unblock_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /unblock <start date> to <end date>
+    e.g. /unblock 24 Dec 2026 to 2 Jan 2027"""
+    args = ctx.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: `/unblock <start> to <end>`\n"
+            "_(e.g. `/unblock 24 Dec 2026 to 2 Jan 2027`)_",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        sep_idx = next(i for i, a in enumerate(args) if a.lower() == "to")
+    except StopIteration:
+        await update.message.reply_text(
+            "⚠️ Missing *to* keyword. Usage: `/unblock 24 Dec 2026 to 2 Jan 2027`",
+            parse_mode="Markdown"
+        )
+        return
+
+    start_tokens = args[:sep_idx]
+    end_tokens = args[sep_idx + 1:]
+
+    start_date = None
+    for n in (3, 2, 1):
+        if len(start_tokens) >= n:
+            start_date = parse_date_obj(" ".join(start_tokens[:n]))
+            if start_date:
+                break
+    if not start_date:
+        await update.message.reply_text(
+            "⚠️ Couldn't parse the *start* date. Try: `24 Dec 2026` or `24/12/2026`",
+            parse_mode="Markdown"
+        )
+        return
+
+    end_date = None
+    for n in (3, 2, 1):
+        if len(end_tokens) >= n:
+            end_date = parse_date_obj(" ".join(end_tokens[:n]))
+            if end_date:
+                break
+    if not end_date:
+        await update.message.reply_text(
+            "⚠️ Couldn't parse the *end* date. Try: `2 Jan 2027` or `2/1/2027`",
+            parse_mode="Markdown"
+        )
+        return
+
+    if end_date < start_date:
+        await update.message.reply_text("⚠️ End date must be on or after the start date.")
+        return
+
+    from datetime import timedelta
+    current = start_date
+    removed = 0
+    skipped = 0
+    while current <= end_date:
+        deleted = await asyncio.to_thread(db.unblock_date, str(current))
+        if deleted:
+            removed += 1
+        else:
+            skipped += 1
+        current += timedelta(days=1)
+
+    start_label = start_date.strftime("%d %b %Y")
+    end_label   = end_date.strftime("%d %b %Y")
+    reply = f"✅ *{removed} date(s)* unblocked from *{start_label}* to *{end_label}*."
+    if skipped:
+        reply += f"\n_(ℹ️ {skipped} date(s) were already available)_"
+    await update.message.reply_text(reply, parse_mode="Markdown")
 
 
 # ─── CANCEL COMMAND ──────────────────────────────────────────────────────────
@@ -1231,6 +1481,8 @@ def main():
                 CallbackQueryHandler(terminal_dropoff_chosen, pattern="^terminal_dropoff_T[1-4]$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, get_dropoff),
             ],
+            EXTRA_PICKUP:     [MessageHandler(filters.TEXT & ~filters.COMMAND, get_extra_pickup)],
+            EXTRA_DROPOFF:    [MessageHandler(filters.TEXT & ~filters.COMMAND, get_extra_dropoff)],
             FLIGHT_NUMBER:    [MessageHandler(filters.TEXT & ~filters.COMMAND, get_flight)],
             HOURLY_DURATION:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_duration)],
             PAX_COUNT:        [MessageHandler(filters.TEXT & ~filters.COMMAND, get_pax)],
@@ -1240,6 +1492,7 @@ def main():
         fallbacks=[
             CommandHandler("cancel", cancel),
             CommandHandler("start", start),
+            CommandHandler("help", help_command),
             CommandHandler("confirm", owner_confirm),
             CommandHandler("reply", owner_reply),
             CommandHandler("cancelride", owner_cancel),
@@ -1249,6 +1502,7 @@ def main():
             CommandHandler("broadcast", owner_broadcast),
             CommandHandler("setavailability", set_availability),
             CommandHandler("block", block_range),
+            CommandHandler("unblock", unblock_range),
             CommandHandler("clearavailability", clear_availability),
             CommandHandler("viewavailability", view_availability),
             CommandHandler("mybookings", my_bookings),
@@ -1258,7 +1512,8 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^(rates|contact|menu|mybookings)$"))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^(rates|contact|menu|mybookings|help)$"))
     app.add_handler(CommandHandler("mybookings", my_bookings))
     app.add_handler(CommandHandler("confirm", owner_confirm))
     app.add_handler(CommandHandler("reply", owner_reply))
@@ -1269,6 +1524,7 @@ def main():
     app.add_handler(CommandHandler("broadcast", owner_broadcast))
     app.add_handler(CommandHandler("setavailability", set_availability))
     app.add_handler(CommandHandler("block", block_range))
+    app.add_handler(CommandHandler("unblock", unblock_range))
     app.add_handler(CommandHandler("clearavailability", clear_availability))
     app.add_handler(CommandHandler("viewavailability", view_availability))
     app.add_handler(conv)
